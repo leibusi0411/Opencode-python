@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -31,8 +34,43 @@ _MAX_LOG_MESSAGE_LEN = 10_000
 _ALLOWED_LOG_LEVELS = frozenset({"debug", "info", "warning", "error", "critical"})
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Connect configured MCP servers for the lifetime of the server."""
+    from mycode.config import config as configmod
+    from mycode.mcp import runtime as mcp_runtime
+    from mycode.mcp.mcp import McpManager
+    from mycode.server.routes import mcp as mcp_routes
+    from mycode.util import log as logmod
+
+    logger = logmod.create(service="server.lifecycle")
+    manager = McpManager()
+    mcp_runtime.set_manager(manager)
+    mcp_routes.set_manager(manager)
+    app.state.mcp_manager = manager
+
+    try:
+        cfg = configmod.get(directory=os.getcwd())
+        if cfg.mcp:
+            await asyncio.wait_for(manager.init(cfg.mcp), timeout=45)
+            logger.info("mcp servers initialized", count=len(manager.status()))
+    except Exception as exc:
+        logger.warn("mcp initialization failed", error=str(exc))
+
+    try:
+        yield
+    finally:
+        with contextlib.suppress(Exception):
+            await manager.close()
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="mycode", version=__version__, description="MyCode AI coding agent API")
+    app = FastAPI(
+        title="mycode",
+        version=__version__,
+        description="MyCode AI coding agent API",
+        lifespan=_lifespan,
+    )
 
     # CORS: restrict origins via env var, default to localhost only
     allowed_origins = os.environ.get("OPENCODE_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")

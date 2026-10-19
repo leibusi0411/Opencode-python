@@ -229,8 +229,14 @@ async def prompt(
         # Memory and skills are now injected as system-reminder messages (not in system prompt)
         # This keeps the system prompt static for prefix cache reuse across sessions
 
-        # Load tools
+        # Load tools (built-ins + tools exposed by connected MCP servers)
         tool_registry.register_builtins()
+        try:
+            from mycode.tool.mcp_tool import sync_mcp_tools
+
+            sync_mcp_tools()
+        except Exception:
+            pass
         tools = tool_registry.to_llm_tools()
 
         # Pre-compute system + tools token estimates for compaction checks

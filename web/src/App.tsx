@@ -150,7 +150,6 @@ export default function App() {
         onSelectProject={session.setActiveProjectDirectory}
         onCreate={(directory) => { session.create(directory); setMainView('chat') }}
         onDelete={session.remove}
-        onRestore={session.restore}
         onOpenProject={(directory) => {
           void session.openProject(directory)
         }}

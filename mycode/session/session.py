@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_
 
 from mycode.project.instance import current, current_or_none
 from mycode.storage.database import get_session as get_db_session
@@ -182,6 +182,40 @@ def list_sessions(*, project_id: str | None = None, directory: str | None = None
             q = q.filter(SessionTable.project_id == pid)
         rows = q.order_by(SessionTable.time_updated.desc()).limit(limit).all()
         return [_from_row(r) for r in rows]
+    finally:
+        db.close()
+
+
+def list_directories(*, limit: int = 100) -> list[dict[str, Any]]:
+    """List distinct directories that hold visible sessions, newest first.
+
+    The web client uses this on startup so it can restore every folder the
+    user has worked in, instead of relying on ``localStorage`` state that
+    can be stale, empty, or written before hydration finishes.
+    """
+    db = get_db_session()
+    try:
+        rows = (
+            db.query(
+                SessionTable.directory,
+                func.count(SessionTable.id),
+                func.max(SessionTable.time_updated),
+            )
+            .filter(SessionTable.visible == 1)
+            .group_by(SessionTable.directory)
+            .order_by(func.max(SessionTable.time_updated).desc())
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "directory": directory,
+                "sessions": int(count),
+                "lastUpdated": int(updated or 0),
+            }
+            for directory, count, updated in rows
+            if directory
+        ]
     finally:
         db.close()
 

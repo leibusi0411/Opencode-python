@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react'
 import {
   Plus,
   Trash2,
-  RotateCcw,
   MessageSquare,
   Loader2,
   PanelLeftClose,
@@ -40,7 +39,6 @@ interface Props {
   onSelectProject: (directory: string) => void
   onCreate: (directory?: string) => void
   onDelete: (id: string, directory?: string) => void
-  onRestore: (id: string, directory?: string) => void
   onOpenProject: (directory: string) => void
   onCloseProject: (directory: string) => void
   loading: boolean
@@ -163,7 +161,6 @@ export default function Sidebar({
   onSelectProject,
   onCreate,
   onDelete,
-  onRestore,
   onOpenProject,
   onCloseProject,
   loading,
@@ -184,7 +181,6 @@ export default function Sidebar({
   onOpenOrchestration,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false)
-  const [showDeleted, setShowDeleted] = useState<Record<string, boolean>>({})
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({})
   const [searchQuery, setSearchQuery] = useState('')
   const [isSearching, setIsSearching] = useState(false)
@@ -398,7 +394,6 @@ export default function Sidebar({
                     const groupedSessions = groupSessions(project.filteredSessions)
                     const isActiveProject = project.directory === activeProjectDirectory
                     const isExpanded = expandedProjects[project.directory] ?? isActiveProject
-                    const showDeletedForProject = showDeleted[project.directory] ?? false
 
                     return (
                       <div key={project.directory} className="rounded-2xl border border-line-subtle bg-surface-1/50 overflow-hidden">
@@ -465,39 +460,6 @@ export default function Sidebar({
                               </div>
                             )}
 
-                            {project.deletedSessions.length > 0 && (
-                              <div className="mt-3 pt-2 border-t border-line-subtle">
-                                <button
-                                  onClick={() => setShowDeleted((prev) => ({ ...prev, [project.directory]: !showDeletedForProject }))}
-                                  className="flex items-center gap-2 px-2 py-1.5 w-full text-left rounded-lg hover:bg-surface-hover transition-colors"
-                                >
-                                  {showDeletedForProject ? <ChevronDown size={11} className="text-ink-muted" /> : <ChevronRight size={11} className="text-ink-muted" />}
-                                  <Trash2 size={11} className="text-ink-muted" />
-                                  <span className="text-xxs text-ink-muted font-medium flex-1">已删除</span>
-                                  <span className="text-xxs text-ink-faint bg-surface-2 px-1.5 py-0.5 rounded-md font-mono">{project.deletedSessions.length}</span>
-                                </button>
-                                {showDeletedForProject && (
-                                  <div className="mt-1 space-y-0.5">
-                                    {project.deletedSessions.map((session) => (
-                                      <div key={session.id} className="group flex items-center gap-2 px-2 py-1.5 rounded-lg text-ink-muted hover:bg-surface-hover transition-colors">
-                                        <MessageSquare size={11} className="flex-shrink-0 opacity-30" />
-                                        <span className="text-xxs opacity-60 truncate flex-1">{session.title || '未命名会话'}</span>
-                                        <button
-                                          onClick={(e) => {
-                                            e.stopPropagation()
-                                            onRestore(session.id, project.directory)
-                                          }}
-                                          className="opacity-0 group-hover:opacity-100 p-1 rounded-lg hover:bg-status-success-light text-ink-muted hover:text-status-success transition-all"
-                                          title="恢复"
-                                        >
-                                          <RotateCcw size={11} />
-                                        </button>
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            )}
                           </div>
                         )}
                       </div>

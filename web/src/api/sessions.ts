@@ -28,8 +28,18 @@ interface PausedRunResponse {
   state: PausedRun | null
 }
 
+export interface SessionDirectory {
+  directory: string
+  sessions: number
+  lastUpdated: number
+}
+
 export async function listSessions(directory?: string): Promise<Session[]> {
   return apiFetch<Session[]>(`/session${buildQuery(directory)}`)
+}
+
+export async function listSessionDirectories(): Promise<SessionDirectory[]> {
+  return apiFetch<SessionDirectory[]>('/session/directories')
 }
 
 export async function createSession(title?: string, directory?: string): Promise<Session> {

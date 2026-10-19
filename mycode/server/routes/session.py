@@ -437,6 +437,18 @@ async def session_list_deleted(directory: str = Query(default="."), limit: int =
     return await provide(directory, _fn)
 
 
+@router.get("/directories")
+async def session_directories(limit: int = Query(default=100)) -> Any:
+    """Directories that hold sessions, most recently used first.
+
+    Lets the web client restore every previously used folder on startup
+    without depending on localStorage.
+    """
+    from mycode.session.session import list_directories
+
+    return list_directories(limit=limit)
+
+
 @router.post("")
 async def session_create(request: Request, directory: str = Query(default=".")) -> Any:
     from mycode.project.instance import provide

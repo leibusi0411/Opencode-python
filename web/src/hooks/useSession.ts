@@ -1,10 +1,14 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import type { Session, WorkspaceProject } from '../types'
-import { listSessions, createSession, deleteSession, restoreSession, listDeletedSessions } from '../api/sessions'
+import {
+  listSessions,
+  createSession,
+  deleteSession,
+  listSessionDirectories,
+} from '../api/sessions'
 
 export interface SessionProject extends WorkspaceProject {
   sessions: Session[]
-  deletedSessions: Session[]
   loading: boolean
 }
 
@@ -28,14 +32,14 @@ function persistJson(key: string, value: unknown) {
 }
 
 function readStoredProjectDirectories(): string[] {
-  if (typeof window === 'undefined') return ['.']
+  if (typeof window === 'undefined') return []
   try {
     const raw = window.localStorage.getItem(OPEN_PROJECTS_STORAGE_KEY)
-    if (raw == null) return ['.']
+    if (raw == null) return []
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : ['.']
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
   } catch {
-    return ['.']
+    return []
   }
 }
 
@@ -44,7 +48,17 @@ function sortSessions(list: Session[]): Session[] {
 }
 
 function normalizeDirectory(directory: string): string {
-  return directory.replace(/[\\/]+$/, '')
+  // Windows paths reach us in both slash styles and with inconsistent
+  // drive-letter casing. Compare on a canonical form so a folder stored
+  // in localStorage always matches the same folder returned by the API.
+  return directory.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+}
+
+function latestSessionTime(project: SessionProject): number {
+  return project.sessions.reduce(
+    (latest, session) => Math.max(latest, session.time.updated ?? session.time.created),
+    0,
+  )
 }
 
 function basename(directory: string): string {
@@ -64,18 +78,13 @@ function buildWorkspaceProject(directory: string): WorkspaceProject {
 
 async function loadProjectState(directory: string): Promise<SessionProject | null> {
   try {
-    const [sessions, deletedSessions] = await Promise.all([
-      listSessions(directory),
-      listDeletedSessions(directory),
-    ])
+    const sessions = await listSessions(directory)
     const normalizedDirectory = normalizeDirectory(directory)
     const scopedSessions = sessions.filter((session) => normalizeDirectory(session.directory) === normalizedDirectory)
-    const scopedDeletedSessions = deletedSessions.filter((session) => normalizeDirectory(session.directory) === normalizedDirectory)
 
     return {
       ...buildWorkspaceProject(directory),
       sessions: sortSessions(scopedSessions),
-      deletedSessions: sortSessions(scopedDeletedSessions),
       loading: false,
     }
   } catch (err) {
@@ -88,7 +97,6 @@ function createPendingProject(directory: string): SessionProject {
   return {
     ...buildWorkspaceProject(directory),
     sessions: [],
-    deletedSessions: [],
     loading: true,
   }
 }
@@ -103,6 +111,10 @@ export function useSession() {
   )
   const [lastActive, setLastActive] = useState<{ directory: string; sessionId: string } | null>(null)
   const [loading, setLoading] = useState(true)
+  // Guards the persistence effects below: before hydration finishes the
+  // in-memory project list is empty, and writing it would erase the very
+  // state this effect is about to read on the next refresh.
+  const [hydrated, setHydrated] = useState(false)
 
   const setActiveProjectDirectory = useCallback((directory: string | null) => {
     setActiveProjectDirectoryState(directory)
@@ -113,16 +125,59 @@ export function useSession() {
 
     const hydrate = async () => {
       setLoading(true)
-      const seeds = readStoredProjectDirectories()
-      const loaded = (await Promise.all(seeds.map(loadProjectState))).filter((item): item is SessionProject => !!item)
+
+      // localStorage remembers what this browser last had open; the backend
+      // knows every folder that actually contains sessions. Merge both so a
+      // fresh browser (or wiped storage) still restores past conversations.
+      const storedDirectories = readStoredProjectDirectories()
+      let remoteDirectories: string[] = []
+      try {
+        remoteDirectories = (await listSessionDirectories()).map((item) => item.directory)
+      } catch (err) {
+        console.error('Failed to list session directories', err)
+      }
 
       if (cancelled) return
 
-      const deduped = loaded.filter((item, index, arr) => arr.findIndex((entry) => entry.directory === item.directory) === index)
+      const seeds: string[] = []
+      const seenDirectories = new Set<string>()
+      for (const directory of [...storedDirectories, ...remoteDirectories]) {
+        const key = normalizeDirectory(directory)
+        if (!key || seenDirectories.has(key)) continue
+        seenDirectories.add(key)
+        seeds.push(directory)
+      }
+
+      const loaded = (await Promise.all(seeds.map(loadProjectState))).filter(
+        (item): item is SessionProject => !!item,
+      )
+
+      if (cancelled) return
+
+      const deduped: SessionProject[] = []
+      const seenProjects = new Set<string>()
+      for (const project of loaded) {
+        const key = normalizeDirectory(project.directory)
+        if (seenProjects.has(key)) continue
+        seenProjects.add(key)
+        deduped.push(project)
+      }
+
       setProjects(deduped)
+      setHydrated(true)
       setActiveProjectDirectoryState((prev) => {
-        if (prev && deduped.some((project) => project.directory === prev)) return prev
-        return deduped[0]?.directory ?? null
+        const previous = prev
+          ? deduped.find((project) => normalizeDirectory(project.directory) === normalizeDirectory(prev))
+          : undefined
+        if (previous) return previous.directory
+
+        // No usable stored project: land on the folder with the most
+        // recently touched session so the conversation list is never blank
+        // when sessions already exist.
+        const newest = [...deduped]
+          .filter((project) => project.sessions.length > 0)
+          .sort((a, b) => latestSessionTime(b) - latestSessionTime(a))[0]
+        return newest?.directory ?? deduped[0]?.directory ?? null
       })
       setLoading(false)
     }
@@ -135,8 +190,9 @@ export function useSession() {
   }, [])
 
   useEffect(() => {
+    if (!hydrated) return
     persistJson(OPEN_PROJECTS_STORAGE_KEY, projects.map((project) => project.directory))
-  }, [projects])
+  }, [projects, hydrated])
 
   useEffect(() => {
     persistJson(ACTIVE_PROJECT_STORAGE_KEY, activeProjectDirectory)
@@ -149,24 +205,33 @@ export function useSession() {
   useEffect(() => {
     if (projects.length === 0) return
     setActiveProjectDirectoryState((prev) => {
-      if (prev && projects.some((project) => project.directory === prev)) return prev
+      const match = prev
+        ? projects.find((project) => normalizeDirectory(project.directory) === normalizeDirectory(prev))
+        : undefined
+      if (match) return match.directory
       return projects[0].directory
     })
   }, [projects])
 
+  // Pick a session automatically: keep the remembered one when it still
+  // exists, otherwise fall back to the most recently updated session in the
+  // active folder. This is what makes a refresh land directly in the last
+  // conversation instead of an empty chat pane.
   useEffect(() => {
     if (!activeProjectDirectory) return
-    const project = projects.find((item) => item.directory === activeProjectDirectory)
+    const project = projects.find(
+      (item) => normalizeDirectory(item.directory) === normalizeDirectory(activeProjectDirectory),
+    )
     if (!project) return
 
-    const activeId = activeSessionsByProject[activeProjectDirectory]
+    const activeId = activeSessionsByProject[project.directory]
     if (activeId && project.sessions.some((session) => session.id === activeId)) return
     const fallbackId = project.sessions[0]?.id ?? null
     if ((activeId ?? null) === fallbackId) return
 
     setActiveSessionsByProject((prev) => ({
       ...prev,
-      [activeProjectDirectory]: fallbackId,
+      [project.directory]: fallbackId,
     }))
   }, [activeProjectDirectory, activeSessionsByProject, projects])
 
@@ -193,60 +258,80 @@ export function useSession() {
   }, [])
 
   const openProject = useCallback(async (directory: string) => {
-    setActiveProjectDirectoryState(directory)
+    // Reuse the folder already in the list when it differs only by slash
+    // style or drive-letter case, instead of adding a duplicate project.
+    const existing = projects.find(
+      (project) => normalizeDirectory(project.directory) === normalizeDirectory(directory),
+    )
+    const canonical = existing?.directory ?? directory
+
+    setActiveProjectDirectoryState(canonical)
     setProjects((prev) => {
-      const existingIndex = prev.findIndex((project) => project.directory === directory)
+      const existingIndex = prev.findIndex(
+        (project) => normalizeDirectory(project.directory) === normalizeDirectory(canonical),
+      )
       if (existingIndex !== -1) {
         const copy = [...prev]
         copy[existingIndex] = { ...copy[existingIndex], loading: true }
         return copy
       }
-      return [...prev, createPendingProject(directory)]
+      return [...prev, createPendingProject(canonical)]
     })
 
-    const next = await loadProjectState(directory)
+    const next = await loadProjectState(canonical)
     if (!next) return null
 
     setProjects((prev) => {
-      const existingIndex = prev.findIndex((project) => project.directory === next.directory)
+      const existingIndex = prev.findIndex(
+        (project) => normalizeDirectory(project.directory) === normalizeDirectory(next.directory),
+      )
       if (existingIndex === -1) return [...prev, next]
       const copy = [...prev]
       copy[existingIndex] = next
       return copy
     })
     return next
-  }, [])
+  }, [projects])
 
   const closeProject = useCallback((directory: string) => {
-    const index = projects.findIndex((project) => project.directory === directory)
+    const index = projects.findIndex(
+      (project) => normalizeDirectory(project.directory) === normalizeDirectory(directory),
+    )
     if (index === -1) return
+    const removed = projects[index]
 
-    const remaining = projects.filter((project) => project.directory !== directory)
+    const remaining = projects.filter((project) => project !== removed)
     const fallbackDirectory = remaining[Math.min(index, remaining.length - 1)]?.directory ?? remaining[0]?.directory ?? null
 
     setProjects(remaining)
-    setActiveProjectDirectoryState((prev) => (prev === directory ? fallbackDirectory : prev))
+    setActiveProjectDirectoryState((prev) =>
+      prev && normalizeDirectory(prev) === normalizeDirectory(removed.directory) ? fallbackDirectory : prev,
+    )
     setActiveSessionsByProject((prev) => {
       const next = { ...prev }
-      delete next[directory]
+      delete next[removed.directory]
       return next
     })
-    setLastActive((prev) => (prev?.directory === directory ? null : prev))
+    setLastActive((prev) => (prev?.directory === removed.directory ? null : prev))
   }, [projects])
 
   const setActiveSession = useCallback((directory: string, sessionId: string | null) => {
+    const canonical = projects.find(
+      (project) => normalizeDirectory(project.directory) === normalizeDirectory(directory),
+    )?.directory ?? directory
+
     setActiveSessionsByProject((prev) => {
-      const previous = prev[directory]
+      const previous = prev[canonical]
       if (previous && previous !== sessionId) {
-        setLastActive({ directory, sessionId: previous })
+        setLastActive({ directory: canonical, sessionId: previous })
       }
       return {
         ...prev,
-        [directory]: sessionId,
+        [canonical]: sessionId,
       }
     })
-    setActiveProjectDirectoryState(directory)
-  }, [])
+    setActiveProjectDirectoryState(canonical)
+  }, [projects])
 
   const create = useCallback(async (directory?: string) => {
     const targetDirectory = directory ?? activeProjectDirectory ?? projects[0]?.directory
@@ -275,15 +360,11 @@ export function useSession() {
     }
 
     setProjects((prev) =>
-      prev.map((project) => {
-        if (project.directory !== targetDirectory) return project
-        const target = project.sessions.find((session) => session.id === id)
-        return {
-          ...project,
-          sessions: project.sessions.filter((session) => session.id !== id),
-          deletedSessions: target ? [{ ...target, visible: false }, ...project.deletedSessions] : project.deletedSessions,
-        }
-      }),
+      prev.map((project) =>
+        project.directory === targetDirectory
+          ? { ...project, sessions: project.sessions.filter((session) => session.id !== id) }
+          : project,
+      ),
     )
 
     if (activeSessionsByProject[targetDirectory] === id) {
@@ -292,32 +373,6 @@ export function useSession() {
       setActiveSession(targetDirectory, fallbackId)
     }
   }, [activeProjectDirectory, activeSessionsByProject, projects, setActiveSession])
-
-  const restore = useCallback(async (id: string, directory?: string) => {
-    const targetDirectory = directory ?? activeProjectDirectory
-    if (!targetDirectory) return
-
-    try {
-      await restoreSession(id, targetDirectory)
-    } catch (err) {
-      console.error('Failed to restore session', err)
-      return
-    }
-
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (project.directory !== targetDirectory) return project
-        const target = project.deletedSessions.find((session) => session.id === id)
-        return {
-          ...project,
-          sessions: target ? [{ ...target, visible: true }, ...project.sessions] : project.sessions,
-          deletedSessions: project.deletedSessions.filter((session) => session.id !== id),
-        }
-      }),
-    )
-
-    setActiveSession(targetDirectory, id)
-  }, [activeProjectDirectory, setActiveSession])
 
   const returnToLastSession = useCallback(() => {
     if (!lastActive) return
@@ -335,7 +390,12 @@ export function useSession() {
   }, [projects, setActiveSession])
 
   const activeProject = useMemo(
-    () => projects.find((project) => project.directory === activeProjectDirectory) ?? null,
+    () =>
+      activeProjectDirectory
+        ? projects.find(
+            (project) => normalizeDirectory(project.directory) === normalizeDirectory(activeProjectDirectory),
+          ) ?? null
+        : null,
     [activeProjectDirectory, projects],
   )
   const activeId = activeProject ? activeSessionsByProject[activeProject.directory] ?? null : null
@@ -371,7 +431,6 @@ export function useSession() {
     refreshProject,
     create,
     remove,
-    restore,
     lastActive,
     returnToLastSession,
     canReturnToLastSession,

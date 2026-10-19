@@ -1,7 +1,27 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import type { Config } from 'tailwindcss'
 
+// Editors/agents can leave hidden scratch directories inside src/
+// (".<file>.<pid>.<uuid>.tmpdir") whose permissions deny reads. A
+// `./src/**` glob walks into them and Tailwind crashes with EPERM, which
+// takes the whole stylesheet down. Collect real source files ourselves and
+// skip every dot entry so junk directories can never break the build.
+function sourceFiles(dir: string, acc: string[] = []): string[] {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.')) continue
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      sourceFiles(full, acc)
+    } else if (/\.(js|jsx|ts|tsx)$/.test(entry.name)) {
+      acc.push(path.relative(process.cwd(), full).replace(/\\/g, '/'))
+    }
+  }
+  return acc
+}
+
 export default {
-  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  content: ['./index.html', ...sourceFiles('./src')],
   theme: {
     extend: {
       fontFamily: {
